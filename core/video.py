@@ -1,63 +1,17 @@
 import asyncio
 import json
-import re
+import logging
 from pathlib import Path
 
 import httpx
 
 from config import settings
+from core.url_parser import DESKTOP_UA, STEALTH_SCRIPT, parse_share_input
 
-_DESKTOP_UA = (
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/131.0.0.0 Safari/537.36"
-)
+logger = logging.getLogger(__name__)
 
-_STEALTH_SCRIPT = """
-Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-Object.defineProperty(navigator, 'plugins', {get: () => [1,2,3,4,5]});
-Object.defineProperty(navigator, 'languages', {get: () => ['zh-CN', 'zh', 'en']});
-window.chrome = {runtime: {}};
-"""
-
-
-def _extract_url_from_text(text: str) -> str:
-    """从分享口令中提取 URL"""
-    match = re.search(r"https?://[^\s]+", text)
-    if not match:
-        raise ValueError("未找到有效链接")
-    return match.group(0).rstrip("/")
-
-
-async def _resolve_short_url(url: str) -> str:
-    """跟踪短链重定向，返回最终长链接"""
-    if "v.douyin.com" not in url and "vm.douyin.com" not in url:
-        return url
-    try:
-        async with httpx.AsyncClient(follow_redirects=False) as client:
-            resp = await client.get(url, headers={"User-Agent": _DESKTOP_UA}, timeout=10.0)
-            location = resp.headers.get("Location", "")
-            if location:
-                return location
-    except Exception:
-        pass
-    return url
-
-
-def _extract_aweme_id(url: str) -> str:
-    """从 URL 中提取 aweme_id"""
-    for pattern in [r"/video/(\d+)", r"modal_id=(\d+)", r"/note/(\d+)"]:
-        match = re.search(pattern, url)
-        if match:
-            return match.group(1)
-    raise ValueError(f"无法从链接提取视频ID: {url}")
-
-
-async def _parse_input(text: str) -> str:
-    """解析用户输入（分享口令/短链/长链），返回 aweme_id"""
-    url = _extract_url_from_text(text)
-    url = await _resolve_short_url(url)
-    return _extract_aweme_id(url)
+_DETAIL_API_PATH = "/aweme/v1/web/aweme/detail/"
+_DETAIL_TIMEOUT = 15.0
 
 
 async def _create_browser_context(playwright):
@@ -67,11 +21,11 @@ async def _create_browser_context(playwright):
         args=["--disable-blink-features=AutomationControlled", "--headless=new"],
     )
     context = await browser.new_context(
-        user_agent=_DESKTOP_UA,
+        user_agent=DESKTOP_UA,
         viewport={"width": 1280, "height": 800},
         locale="zh-CN",
     )
-    await context.add_init_script(_STEALTH_SCRIPT)
+    await context.add_init_script(STEALTH_SCRIPT)
     return browser, context
 
 
@@ -79,8 +33,7 @@ async def _warm_up_cookies(context):
     """访问首页获取 cookies，绕过反爬"""
     page = await context.new_page()
     try:
-        await page.goto("https://www.douyin.com/jingxuan", wait_until="commit", timeout=20000)
-        await asyncio.sleep(3)
+        await page.goto("https://www.douyin.com/jingxuan", wait_until="domcontentloaded", timeout=20000)
     except Exception:
         pass
     await page.close()
@@ -109,71 +62,70 @@ def _parse_aweme_detail(detail: dict) -> dict:
     }
 
 
+async def _extract_video_info(page, aweme_id: str) -> dict:
+    """在已打开的页面上拦截 API 响应提取视频信息，用 Event 替代硬等待"""
+    detail_data = {}
+    detail_event = asyncio.Event()
+
+    async def on_response(response):
+        nonlocal detail_data
+        if response.status != 200:
+            return
+        if _DETAIL_API_PATH not in response.url:
+            return
+        if aweme_id not in response.url:
+            return
+        try:
+            text = await response.text()
+            body = json.loads(text)
+            detail = body.get("aweme_detail")
+            if detail:
+                detail_data = _parse_aweme_detail(detail)
+                detail_event.set()
+        except Exception:
+            pass
+
+    page.on("response", on_response)
+    await page.goto(f"https://www.douyin.com/video/{aweme_id}", wait_until="commit", timeout=45000)
+
+    # 等待 API 响应，最长 _DETAIL_TIMEOUT 秒
+    try:
+        await asyncio.wait_for(detail_event.wait(), timeout=_DETAIL_TIMEOUT)
+    except asyncio.TimeoutError:
+        logger.warning("API 响应超时，尝试页面兜底提取")
+
+    # 兜底：如果 API 拦截失败，尝试从页面提取
+    if not detail_data:
+        title = (await page.title()).replace(" - 抖音", "")
+        detail_data = {
+            "aweme_id": aweme_id,
+            "title": title,
+            "author": "",
+            "duration": None,
+            "video_url": None,
+            "thumbnail": None,
+            "like_count": None,
+            "comment_count": None,
+        }
+
+    if not detail_data.get("aweme_id"):
+        detail_data["aweme_id"] = aweme_id
+
+    return detail_data
+
+
 async def get_video_info_playwright(url: str) -> dict:
     """用 Playwright 从抖音页面提取视频信息"""
     from playwright.async_api import async_playwright
 
-    aweme_id = await _parse_input(url)
+    aweme_id = await parse_share_input(url)
 
     async with async_playwright() as p:
         browser, context = await _create_browser_context(p)
         await _warm_up_cookies(context)
         page = await context.new_page()
-
-        # 拦截 detail API 响应
-        detail_data = {}
-
-        async def on_response(response):
-            nonlocal detail_data
-            resp_url = response.url
-            if response.status != 200:
-                return
-            if "/aweme/v1/web/aweme/detail/" not in resp_url:
-                return
-            if aweme_id not in resp_url:
-                return
-            try:
-                text = await response.text()
-                body = json.loads(text)
-                detail = body.get("aweme_detail")
-                if detail:
-                    detail_data = _parse_aweme_detail(detail)
-            except Exception:
-                pass
-
-        page.on("response", on_response)
-
-        await page.goto(f"https://www.douyin.com/video/{aweme_id}", wait_until="commit", timeout=45000)
-        await asyncio.sleep(10)
-
-        # 兜底：如果 API 拦截失败，尝试从页面提取
-        if not detail_data:
-            # 尝试从 video 标签获取
-            video_src = await page.evaluate(
-                """
-                () => {
-                    const v = document.querySelector('video');
-                    return v ? (v.src || v.currentSrc) : null;
-                }
-                """
-            )
-            title = (await page.title()).replace(" - 抖音", "")
-            detail_data = {
-                "aweme_id": aweme_id,
-                "title": title,
-                "author": "",
-                "duration": None,
-                "video_url": None,
-                "thumbnail": None,
-                "like_count": None,
-                "comment_count": None,
-            }
-            # blob: URL 无法直接下载，需要从 API 获取
-
+        detail_data = await _extract_video_info(page, aweme_id)
         await browser.close()
-
-    if not detail_data.get("aweme_id"):
-        detail_data["aweme_id"] = aweme_id
 
     return detail_data
 
@@ -183,13 +135,29 @@ async def get_video_info(url: str) -> dict:
     return await get_video_info_playwright(url)
 
 
-async def download_video_playwright(url: str, output_dir: str = "./downloads") -> tuple[str, dict]:
-    """用 Playwright 下载无水印视频，返回 (文件路径, 视频信息)"""
-    import httpx
+async def download_video_playwright(
+    url: str,
+    output_dir: str = "./downloads",
+    on_progress=None,
+) -> tuple[str, dict]:
+    """下载无水印视频，返回 (文件路径, 视频信息)
 
-    info = await get_video_info_playwright(url)
+    复用同一个浏览器生命周期：info 阶段拿到下载链接后直接下载，不再二次启动。
+    on_progress: 可选回调 (downloaded_bytes, total_bytes|None)
+    """
+    from playwright.async_api import async_playwright
+
+    aweme_id = await parse_share_input(url)
+
+    async with async_playwright() as p:
+        browser, context = await _create_browser_context(p)
+        await _warm_up_cookies(context)
+        page = await context.new_page()
+
+        info = await _extract_video_info(page, aweme_id)
+        await browser.close()
+
     video_url = info.get("video_url")
-
     if not video_url:
         raise ValueError("无法获取视频下载地址，请检查链接是否有效")
 
@@ -198,20 +166,31 @@ async def download_video_playwright(url: str, output_dir: str = "./downloads") -
     file_path = Path(output_dir) / f"{aweme_id}.mp4"
 
     headers = {
-        "User-Agent": _DESKTOP_UA,
+        "User-Agent": DESKTOP_UA,
         "Referer": "https://www.douyin.com/",
     }
     async with httpx.AsyncClient(follow_redirects=True) as client:
-        resp = await client.get(video_url, headers=headers, timeout=120.0)
-        resp.raise_for_status()
-        file_path.write_bytes(resp.content)
+        async with client.stream("GET", video_url, headers=headers, timeout=120.0) as resp:
+            resp.raise_for_status()
+            total = int(resp.headers.get("content-length", 0)) or None
+            downloaded = 0
+            with open(file_path, "wb") as f:
+                async for chunk in resp.aiter_bytes(chunk_size=65536):
+                    f.write(chunk)
+                    downloaded += len(chunk)
+                    if on_progress:
+                        on_progress(downloaded, total)
 
     return str(file_path), info
 
 
-def download_video(url: str, output_dir: str = "./downloads") -> tuple[str, dict]:
+def download_video(
+    url: str,
+    output_dir: str = "./downloads",
+    on_progress=None,
+) -> tuple[str, dict]:
     """下载无水印视频，返回 (文件路径, 视频信息)（同步包装，仅 CLI 用）"""
-    return asyncio.run(download_video_playwright(url, output_dir))
+    return asyncio.run(download_video_playwright(url, output_dir, on_progress=on_progress))
 
 
 def get_video_info_sync(url: str) -> dict:
