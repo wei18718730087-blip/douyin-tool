@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>抖音工具</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        * { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', sans-serif; }
+        body { background: #0a0a0a; color: #e5e5e5; }
+        ::-webkit-scrollbar { width: 5px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: #333; border-radius: 3px; }
+        .fade { animation: fade .4s ease; }
+        @keyframes fade { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+        .spin { width: 18px; height: 18px; border: 2px solid rgba(255,255,255,.12); border-top-color: #fff; border-radius: 50%; animation: spin .6s linear infinite; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        input:focus { outline: none; box-shadow: 0 0 0 2px rgba(255,255,255,.1); }
+        .bar-fill { transition: width .5s ease; }
+    </style>
+</head>
+<body class="min-h-screen">
+    <!-- Header -->
+    <div class="border-b border-neutral-800">
+        <div class="max-w-3xl mx-auto px-4 h-12 flex items-center justify-between">
+            <span class="text-sm font-semibold text-white tracking-tight">抖音工具</span>
+            <span class="text-[11px] text-neutral-500">无水印下载 &middot; 评论抓取 &middot; 关键词分析</span>
+        </div>
+    </div>
+
+    <div class="max-w-3xl mx-auto px-4 py-6">
+        <!-- URL Input -->
+        <div class="flex gap-2 mb-6">
+            <input type="text" id="url-input" placeholder="粘贴抖音链接或分享口令..."
+                   class="flex-1 bg-neutral-900 border border-neutral-800 rounded-lg px-4 py-3 text-sm text-white placeholder-neutral-600 transition-colors focus:border-neutral-600"
+                   onkeydown="if(event.key==='Enter')analyze()">
+            <button onclick="analyze()" id="btn-analyze"
+                    class="px-6 py-3 bg-white text-black rounded-lg text-sm font-medium hover:bg-neutral-200 transition-colors disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap">
+                解析
+            </button>
+        </div>
+
+        <!-- Loading -->
+        <div id="loading" class="hidden text-center py-12 fade">
+            <div class="spin mx-auto mb-3"></div>
+            <p class="text-sm text-neutral-500" id="loading-text">正在解析...</p>
+        </div>
+
+        <!-- Error -->
+        <div id="error" class="hidden bg-red-950/40 border border-red-900/50 rounded-lg px-4 py-3 mb-4 text-sm text-red-400 fade"></div>
+
+        <!-- Results -->
+        <div id="results" class="hidden space-y-4 fade">
+            <!-- Video Info Card -->
+            <div class="bg-neutral-900 border border-neutral-800 rounded-xl overflow-hidden">
+                <div class="p-4">
+                    <div class="flex gap-4">
+                        <div id="thumb-wrap" class="hidden w-24 h-24 rounded-lg overflow-hidden flex-shrink-0 bg-neutral-800">
+                            <img id="thumb" class="w-full h-full object-cover" src="" alt="">
+                        </div>
+                        <div class="flex-1 min-w-0">
+                            <h2 class="text-sm font-semibold text-white leading-snug line-clamp-2" id="v-title"></h2>
+                            <p class="text-xs text-neutral-500 mt-1" id="v-author"></p>
+                            <div class="flex flex-wrap gap-3 mt-2 text-xs text-neutral-500" id="v-stats"></div>
+                        </div>
+                    </div>
+                </div>
+                <div class="border-t border-neutral-800 px-4 py-3 flex items-center justify-between">
+                    <span class="text-[11px] text-neutral-600 font-mono" id="v-id"></span>
+                    <button onclick="downloadVideo()" id="btn-download"
+                            class="px-4 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-medium rounded-md transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
+                        下载无水印视频
+                    </button>
+                </div>
+                <div id="download-result" class="hidden border-t border-neutral-800 px-4 py-3">
+                    <div class="flex items-center gap-2 text-xs text-emerald-400">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M4.5 12.75l6 6 9-13.5"/></svg>
+                        <span id="download-path"></span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Comments Section -->
+            <div class="bg-neutral-900 border border-neutral-800 rounded-xl overflow-hidden">
+                <div class="px-4 py-3 border-b border-neutral-800 flex items-center justify-between">
+                    <div class="flex items-center gap-2">
+                        <span class="text-sm font-medium text-white">评论</span>
+                        <span class="text-xs text-neutral-500" id="comment-count-label"></span>
+                    </div>
+                    <div class="flex gap-1.5" id="comment-actions" class="hidden">
+                        <button onclick="exportComments('json')" class="px-2.5 py-1 text-[11px] text-neutral-400 bg-neutral-800 hover:bg-neutral-700 rounded transition-colors">JSON</button>
+                        <button onclick="exportComments('csv')" class="px-2.5 py-1 text-[11px] text-neutral-400 bg-neutral-800 hover:bg-neutral-700 rounded transition-colors">CSV</button>
+                    </div>
+                </div>
+                <div id="comment-progress" class="hidden px-4 py-3">
+                    <div class="flex items-center justify-between mb-1.5">
+                        <span class="text-xs text-neutral-500">抓取中...</span>
+                        <span class="text-xs text-neutral-400" id="comment-progress-count">0 条</span>
+                    </div>
+                    <div class="h-1 bg-neutral-800 rounded-full overflow-hidden">
+                        <div class="h-full bg-white/20 rounded-full bar-fill" id="comment-bar" style="width:0%"></div>
+                    </div>
+                </div>
+                <div id="comment-list" class="max-h-96 overflow-y-auto"></div>
+                <div id="comment-empty" class="hidden px-4 py-8 text-center text-xs text-neutral-600">暂无评论数据</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast -->
+    <div id="toast" class="fixed bottom-6 right-6 z-50 px-4 py-2.5 rounded-lg text-sm shadow-2xl transition-all duration-300 translate-y-20 opacity-0">
+        <span id="toast-msg"></span>
+    </div>
+
+    <script>
+    let videoData = null;
+    let commentsData = [];
+
+    function showError(msg) {
+        const el = document.getElementById('error');
+        el.textContent = msg;
+        el.classList.remove('hidden');
+        document.getElementById('loading').classList.add('hidden');
+    }
+
+    function hideError() {
+        document.getElementById('error').classList.add('hidden');
+    }
+
+    function showLoading(text) {
+        document.getElementById('loading-text').textContent = text;
+        document.getElementById('loading').classList.remove('hidden');
+        document.getElementById('results').classList.add('hidden');
+        hideError();
+    }
+
+    function hideLoading() {
+        document.getElementById('loading').classList.add('hidden');
+    }
+
+    function showToast(msg, type) {
+        const t = document.getElementById('toast');
+        const m = document.getElementById('toast-msg');
+        m.textContent = msg;
+        t.className = 'fixed bottom-6 right-6 z-50 px-4 py-2.5 rounded-lg text-sm shadow-2xl transition-all duration-300 translate-y-0 opacity-100 ' +
+            (type === 'ok' ? 'bg-emerald-900 text-emerald-300 border border-emerald-800' : 'bg-neutral-800 text-neutral-200 border border-neutral-700');
+        setTimeout(() => { t.className = t.className.replace('translate-y-0 opacity-100', 'translate-y-20 opacity-0'); }, 3000);
+    }
+
+    function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+
+    function fmtTime(ts) {
+        if (!ts) return '';
+        const d = new Date(ts * 1000), diff = (Date.now() - d) / 1000;
+        if (diff < 60) return '刚刚';
+        if (diff < 3600) return Math.floor(diff / 60) + '分钟前';
+        if (diff < 86400) return Math.floor(diff / 3600) + '小时前';
+        if (diff < 604800) return Math.floor(diff / 86400) + '天前';
+        return d.toLocaleDateString('zh-CN');
+    }
+
+    async function analyze() {
+        const url = document.getElementById('url-input').value.trim();
+        if (!url) return;
+
+        hideError();
+        videoData = null;
+        commentsData = [];
+
+        showLoading('正在获取视频信息...');
+
+        // 1. Get video info
+        try {
+            const resp = await fetch('/api/v1/video/info', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({url})
+            });
+            const data = await resp.json();
+            if (!resp.ok || data.status !== 'ok') throw new Error(data.detail || data.error || '获取失败');
+            videoData = data;
+            renderVideoInfo(data);
+        } catch (e) {
+            showError('视频信息获取失败: ' + e.message);
+            return;
+        }
+
+        // 2. Fetch comments in parallel with showing results
+        document.getElementById('results').classList.remove('hidden');
+        hideLoading();
+        startCommentFetch(url);
+    }
+
+    function renderVideoInfo(d) {
+        document.getElementById('v-title').textContent = d.title || '未知标题';
+        document.getElementById('v-author').textContent = d.author ? '@' + d.author : '';
+        document.getElementById('v-id').textContent = d.aweme_id ? 'ID: ' + d.aweme_id : '';
+
+        const stats = [];
+        if (d.duration) stats.push(d.duration + '秒');
+        if (d.like_count) stats.push(d.like_count.toLocaleString() + ' 赞');
+        if (d.comment_count) stats.push(d.comment_count.toLocaleString() + ' 评论');
+        document.getElementById('v-stats').innerHTML = stats.map(s => '<span>' + esc(s) + '</span>').join('');
+
+        const tw = document.getElementById('thumb-wrap');
+        if (d.thumbnail) {
+            document.getElementById('thumb').src = d.thumbnail;
+            tw.classList.remove('hidden');
+        } else {
+            tw.classList.add('hidden');
+        }
+
+        document.getElementById('download-result').classList.add('hidden');
+        document.getElementById('btn-download').disabled = false;
+    }
+
+    async function downloadVideo() {
+        const url = document.getElementById('url-input').value.trim();
+        if (!url || !videoData) return;
+
+        const btn = document.getElementById('btn-download');
+        btn.disabled = true;
+        btn.textContent = '下载中...';
+
+        try {
+            const resp = await fetch('/api/v1/video/download', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({url})
+            });
+            const data = await resp.json();
+            if (!resp.ok || data.status !== 'ok') throw new Error(data.detail || data.error || '下载失败');
+
+            document.getElementById('download-path').textContent = data.file_path;
+            document.getElementById('download-result').classList.remove('hidden');
+            showToast('下载完成', 'ok');
+        } catch (e) {
+            showToast('下载失败: ' + e.message);
+        } finally {
+            btn.disabled = false;
+            btn.textContent = '下载无水印视频';
+        }
+    }
+
+    async function startCommentFetch(url) {
+        const maxComments = 50;
+        document.getElementById('comment-progress').classList.remove('hidden');
+        document.getElementById('comment-list').innerHTML = '';
+        document.getElementById('comment-empty').classList.add('hidden');
+        document.getElementById('comment-count-label').textContent = '';
+        document.getElementById('comment-bar').style.width = '0%';
+        document.getElementById('comment-progress-count').textContent = '0 条';
+
+        try {
+            const resp = await fetch('/api/v1/comments', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({url, max_comments: maxComments})
+            });
+            const data = await resp.json();
+
+            document.getElementById('comment-progress').classList.add('hidden');
+
+            if (resp.ok && data.status === 'ok') {
+                commentsData = data.comments || [];
+                renderComments();
+            } else {
+                document.getElementById('comment-empty').classList.remove('hidden');
+                document.getElementById('comment-empty').textContent = '评论抓取失败: ' + (data.detail || data.error || '未知错误');
+            }
+        } catch (e) {
+            document.getElementById('comment-progress').classList.add('hidden');
+            document.getElementById('comment-empty').classList.remove('hidden');
+            document.getElementById('comment-empty').textContent = '评论抓取失败: ' + e.message;
+        }
+    }
+
+    function renderComments() {
+        const list = document.getElementById('comment-list');
+        const label = document.getElementById('comment-count-label');
+        const empty = document.getElementById('comment-empty');
+        const actions = document.getElementById('comment-actions');
+
+        label.textContent = '(' + commentsData.length + ' 条)';
+
+        if (!commentsData.length) {
+            list.innerHTML = '';
+            empty.classList.remove('hidden');
+            return;
+        }
+
+        empty.classList.add('hidden');
+        actions.style.display = '';
+
+        list.innerHTML = commentsData.map(c => `
+            <div class="px-4 py-3 border-b border-neutral-800/50 last:border-0 hover:bg-neutral-800/30 transition-colors">
+                <div class="flex items-start justify-between gap-3">
+                    <div class="min-w-0 flex-1">
+                        <div class="flex items-center gap-2 mb-0.5">
+                            <span class="text-xs font-medium text-neutral-300">${esc(c.author || '匿名')}</span>
+                            <span class="text-[11px] text-neutral-600">${fmtTime(c.create_time)}</span>
+                        </div>
+                        <p class="text-[13px] text-neutral-300 leading-relaxed">${esc(c.text)}</p>
+                    </div>
+                    <span class="text-[11px] text-neutral-600 flex-shrink-0">${c.digg_count || 0}赞</span>
+                </div>
+            </div>
+        `).join('');
+    }
+
+    function exportComments(format) {
+        if (!commentsData.length) return;
+        let content, filename, mime;
+        if (format === 'json') {
+            content = JSON.stringify(commentsData, null, 2);
+            filename = 'comments.json'; mime = 'application/json';
+        } else {
+            const h = 'author,text,digg_count,reply_count,create_time';
+            const rows = commentsData.map(c =>
+                `"${(c.author||'').replace(/"/g,'""')}","${(c.text||'').replace(/"/g,'""')}",${c.digg_count||0},${c.reply_count||0},${c.create_time||0}`
+            );
+            content = h + '\n' + rows.join('\n');
+            filename = 'comments.csv'; mime = 'text/csv';
+        }
+        const blob = new Blob(['﻿' + content], {type: mime + ';charset=utf-8'});
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = filename;
+        a.click();
+        URL.revokeObjectURL(a.href);
+        showToast('已导出 ' + filename, 'ok');
+    }
+    </script>
+</body>
+</html>
