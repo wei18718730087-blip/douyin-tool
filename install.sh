@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -e
 
-REPO="https://github.com/YOUR_USERNAME/douyin-tool.git"
+REPO="https://github.com/wei18718730087-blip/douyin-tool.git"
 INSTALL_DIR="$HOME/.douyin-tool"
 BIN_DIR="$HOME/.local/bin"
 CLI_NAME="douyin-tool"
