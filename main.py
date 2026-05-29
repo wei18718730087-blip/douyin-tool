@@ -9,6 +9,7 @@ from config import settings
 from core.comments import fetch_comments_playwright
 from core.keywords import extract_keywords
 from core.video import download_video_playwright, get_video_info_playwright
+from models.schemas import CommentsRequest, DownloadRequest, KeywordsRequest, VideoRequest
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -32,56 +33,40 @@ async def index(request: Request):
 
 
 @app.post("/api/v1/video/info")
-async def api_video_info(body: dict):
+async def api_video_info(body: VideoRequest):
     """获取视频信息（不下载）"""
-    url = body.get("url")
-    if not url:
-        raise HTTPException(status_code=400, detail="缺少 url 参数")
     try:
-        info = await get_video_info_playwright(url)
+        info = await get_video_info_playwright(body.url)
         return {"status": "ok", **info}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/api/v1/video/download")
-async def api_video_download(body: dict):
+async def api_video_download(body: DownloadRequest):
     """下载无水印视频"""
-    url = body.get("url")
-    output_dir = body.get("output_dir", settings.output_dir)
-    if not url:
-        raise HTTPException(status_code=400, detail="缺少 url 参数")
     try:
-        file_path, info = await download_video_playwright(url, output_dir)
+        file_path, info = await download_video_playwright(body.url, body.output_dir)
         return {"status": "ok", "file_path": file_path, **info}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/api/v1/keywords")
-async def api_keywords(body: dict):
+async def api_keywords(body: KeywordsRequest):
     """从文本中提取高频关键词"""
-    texts = body.get("texts", [])
-    count = body.get("count", 20)
-    method = body.get("method", "mixed")
-    if not texts:
-        raise HTTPException(status_code=400, detail="缺少 texts 参数")
     try:
-        result = extract_keywords(texts, top_k=count, method=method)
+        result = extract_keywords(body.texts, top_k=body.count, method=body.method)
         return {"status": "ok", "keywords": result}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/api/v1/comments")
-async def api_comments(body: dict):
+async def api_comments(body: CommentsRequest):
     """抓取视频评论"""
-    url = body.get("url")
-    max_comments = body.get("max_comments", 50)
-    if not url:
-        raise HTTPException(status_code=400, detail="缺少 url 参数")
     try:
-        comments = await fetch_comments_playwright(url, max_comments=max_comments)
+        comments = await fetch_comments_playwright(body.url, max_comments=body.max_comments)
         return {"status": "ok", "count": len(comments), "comments": comments}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

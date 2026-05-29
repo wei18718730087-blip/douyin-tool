@@ -1,56 +1,9 @@
 import asyncio
-import json
 import logging
-import re
 
-import httpx
+from core.url_parser import DESKTOP_UA, STEALTH_SCRIPT, parse_share_input
 
 logger = logging.getLogger(__name__)
-
-_DESKTOP_UA = (
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/131.0.0.0 Safari/537.36"
-)
-
-_STEALTH_SCRIPT = """
-Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-window.chrome = {runtime: {}};
-"""
-
-
-def _extract_url_from_text(text: str) -> str:
-    """从分享口令中提取 URL"""
-    match = re.search(r"https?://[^\s]+", text)
-    if not match:
-        raise ValueError("未找到有效链接")
-    return match.group(0).rstrip("/")
-
-
-async def _resolve_short_url(url: str) -> str:
-    """跟踪短链重定向，返回最终长链接"""
-    if "v.douyin.com" not in url and "vm.douyin.com" not in url:
-        return url
-    try:
-        async with httpx.AsyncClient(follow_redirects=False) as client:
-            resp = await client.get(url, headers={"User-Agent": _DESKTOP_UA}, timeout=10.0)
-            location = resp.headers.get("Location", "")
-            if location:
-                return location
-    except Exception:
-        pass
-    return url
-
-
-async def _parse_input(text: str) -> str:
-    """解析用户输入（分享口令/短链/长链），返回 aweme_id"""
-    url = _extract_url_from_text(text)
-    url = await _resolve_short_url(url)
-    for pattern in [r"/video/(\d+)", r"modal_id=(\d+)", r"/note/(\d+)"]:
-        match = re.search(pattern, url)
-        if match:
-            return match.group(1)
-    raise ValueError(f"无法从链接提取视频ID: {url}")
 
 
 def _parse_comment_item(item: dict) -> dict:
@@ -78,7 +31,7 @@ async def fetch_comments_playwright(
     """
     from playwright.async_api import async_playwright
 
-    aweme_id = await _parse_input(url)
+    aweme_id = await parse_share_input(url)
 
     collected: list[dict] = []
     seen_cids: set[str] = set()
@@ -89,25 +42,24 @@ async def fetch_comments_playwright(
             args=["--disable-blink-features=AutomationControlled", "--headless=new"],
         )
         context = await browser.new_context(
-            user_agent=_DESKTOP_UA,
+            user_agent=DESKTOP_UA,
             viewport={"width": 1280, "height": 800},
             locale="zh-CN",
         )
-        await context.add_init_script(_STEALTH_SCRIPT)
+        await context.add_init_script(STEALTH_SCRIPT)
 
         # 先访问首页获取 cookies
         warmup = await context.new_page()
         try:
             await warmup.goto("https://www.douyin.com/jingxuan", wait_until="domcontentloaded", timeout=20000)
-            await asyncio.sleep(3)
         except Exception:
             pass
         await warmup.close()
 
         # 打开视频页面（建立上下文）
         page = await context.new_page()
-        await page.goto(f"https://www.douyin.com/video/{aweme_id}", wait_until="commit", timeout=45000)
-        await asyncio.sleep(5)
+        await page.goto(f"https://www.douyin.com/video/{aweme_id}", wait_until="domcontentloaded", timeout=45000)
+        await asyncio.sleep(2)
 
         # 直接调用 comment/list API 分页获取评论
         cursor = 0
