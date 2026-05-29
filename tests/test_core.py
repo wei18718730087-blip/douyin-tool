@@ -63,18 +63,21 @@ class TestExtractKeywords:
 
 
 class TestUrlParser:
-    @pytest.mark.asyncio
-    async def test_extract_from_long_url(self):
+    def test_extract_from_invalid_url(self):
         from core.url_parser import extract_aweme_id
 
-        # 测试长链接格式
         with pytest.raises(ValueError):
-            await extract_aweme_id("https://www.douyin.com/invalid")
+            extract_aweme_id("https://www.douyin.com/invalid")
 
-    @pytest.mark.asyncio
-    async def test_extract_from_text(self):
+    def test_extract_from_valid_url(self):
         from core.url_parser import extract_aweme_id
 
-        # 测试无链接文本
+        assert extract_aweme_id("https://www.douyin.com/video/123456789") == "123456789"
+        assert extract_aweme_id("https://www.douyin.com/video/123?modal_id=999") == "123"
+
+    def test_extract_url_from_text(self):
+        from core.url_parser import extract_url_from_text
+
+        assert extract_url_from_text("打开抖音 https://v.douyin.com/abc 看看") == "https://v.douyin.com/abc"
         with pytest.raises(ValueError, match="未找到有效链接"):
-            await extract_aweme_id("这是一个没有链接的文本")
+            extract_url_from_text("这是一个没有链接的文本")

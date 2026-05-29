@@ -12,9 +12,12 @@ from core.video import download_video, get_video_info_sync
 
 logger = logging.getLogger(__name__)
 
+# 全局 json 模式标记
+_json_mode = False
 
-def _setup_logging(verbose: bool, quiet: bool) -> None:
-    if quiet:
+
+def _setup_logging(verbose: bool, quiet: bool, json_mode: bool) -> None:
+    if json_mode or quiet:
         level = logging.WARNING
     elif verbose:
         level = logging.DEBUG
@@ -25,28 +28,52 @@ def _setup_logging(verbose: bool, quiet: bool) -> None:
         format="%(asctime)s [%(levelname)s] %(message)s",
         stream=sys.stderr,
     )
+    # json 模式下静默 httpx INFO 日志
+    if json_mode:
+        logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
 def _json_output(data) -> None:
-    click.echo(json.dumps(data, ensure_ascii=False, indent=2))
+    if _json_mode:
+        click.echo(json.dumps(data, ensure_ascii=False, separators=(",", ":")))
+    else:
+        click.echo(json.dumps(data, ensure_ascii=False, indent=2))
 
 
-def _classify_error(e: Exception) -> str:
-    """将异常转为用户可读的错误信息"""
+# ── 错误码映射 ──────────────────────────────────────────────
+
+_ERROR_CODES = [
+    ("timeout", "timed out", "NETWORK_TIMEOUT", "网络超时，请检查网络连接后重试"),
+    ("connection", "resolve", "NETWORK_ERROR", "网络连接失败，请检查网络"),
+    ("403", "forbidden", "ANTI_CRAWL", "被抖音反爬拦截，稍后重试或更换网络"),
+]
+
+
+def _classify_error(e: Exception) -> tuple[str, str]:
+    """将异常转为 (error_code, 用户可读错误信息)"""
     err_str = str(e).lower()
-    if "timeout" in err_str or "timed out" in err_str:
-        return "网络超时，请检查网络连接后重试"
-    if "connection" in err_str or "resolve" in err_str:
-        return "网络连接失败，请检查网络"
-    if "403" in err_str or "forbidden" in err_str:
-        return "被抖音反爬拦截，稍后重试或更换网络"
-    if "无法获取视频下载地址" in str(e):
-        return "链接无效或视频已删除"
-    if "未找到有效链接" in str(e):
-        return "输入中未找到有效链接，请粘贴抖音分享口令或 URL"
-    if "无法从链接提取视频ID" in str(e):
-        return "链接格式无法识别，支持：抖音分享口令、短链、视频页长链"
-    return str(e)
+    msg = str(e)
+
+    for keywords, _, code, desc in _ERROR_CODES:
+        if isinstance(keywords, str):
+            keywords = (keywords,)
+        if any(k in err_str for k in keywords):
+            return code, desc
+
+    if "无法获取视频下载地址" in msg:
+        return "VIDEO_NOT_FOUND", "链接无效或视频已删除"
+    if "未找到有效链接" in msg:
+        return "URL_PARSE_FAILED", "输入中未找到有效链接，请粘贴抖音分享口令或 URL"
+    if "无法从链接提取视频ID" in msg:
+        return "URL_PARSE_FAILED", "链接格式无法识别，支持：抖音分享口令、短链、视频页长链"
+    return "UNKNOWN_ERROR", msg
+
+
+def _error_json(e: Exception, **extra) -> dict:
+    """构建带 error_code 的错误 JSON"""
+    code, desc = _classify_error(e)
+    result = {"status": "error", "error_code": code, "error": desc, **extra}
+    return result
 
 
 def _read_urls_from_file(filepath: str) -> list[str]:
@@ -73,10 +100,13 @@ class _CommonOpts:
 @click.pass_context
 @click.option("-v", "--verbose", is_flag=True, help="详细日志")
 @click.option("-q", "--quiet", is_flag=True, help="静默模式，仅输出 JSON")
+@click.option("--json", "json_mode", is_flag=True, help="JSON 模式：stdout 仅输出紧凑 JSON，日志降级到 WARNING")
 @click.option("--version", is_flag=True, help="显示版本")
-def main(ctx, verbose, quiet, version):
+def main(ctx, verbose, quiet, json_mode, version):
     """抖音工具 - 无水印下载 & 评论抓取 & 关键词提取"""
-    _setup_logging(verbose, quiet)
+    global _json_mode
+    _json_mode = json_mode
+    _setup_logging(verbose, quiet, json_mode)
     if version:
         click.echo("douyin-tool 0.1.0")
         return
@@ -89,18 +119,24 @@ def main(ctx, verbose, quiet, version):
 @main.command()
 @click.argument("urls", nargs=-1, required=False)
 @click.option("-o", "--output-dir", default=settings.output_dir, help="视频保存目录")
+@click.option("-O", "--output", "output_file", type=click.Path(), help="指定输出文件路径（单个 URL 时有效）")
 @click.option("-f", "--file", "url_file", type=click.Path(exists=True), help="从文件读取 URL（每行一个）")
 @click.option("--info-only", is_flag=True, help="仅获取信息，不下载")
 @_CommonOpts.add
-def download(urls, output_dir, url_file, info_only, verbose, quiet):
+def download(urls, output_dir, output_file, url_file, info_only, verbose, quiet):
     """下载无水印视频（支持批量）
 
     示例:
       douyin-tool download <url>
+      douyin-tool download -O ~/my_video.mp4 <url>
       douyin-tool download <url1> <url2> <url3>
       douyin-tool download -f urls.txt
       douyin-tool download --info-only <url>
     """
+    if output_file and len(list(urls)) > 1:
+        click.echo("错误: -O 仅支持单个 URL", err=True)
+        sys.exit(1)
+
     # 收集所有 URL
     all_urls = list(urls)
     if url_file:
@@ -118,7 +154,7 @@ def download(urls, output_dir, url_file, info_only, verbose, quiet):
         if info_only:
             result = _handle_info(url)
         else:
-            result = _handle_download(url, output_dir, quiet)
+            result = _handle_download(url, output_dir, quiet, output_file)
         results.append(result)
 
     # 批量时输出数组，单个时输出对象
@@ -134,13 +170,13 @@ def _handle_info(url: str) -> dict:
         return {"status": "ok", "url": url, **info}
     except Exception as e:
         logger.error(f"获取信息失败: {e}")
-        return {"status": "error", "url": url, "error": _classify_error(e)}
+        return _error_json(e, url=url)
 
 
-def _handle_download(url: str, output_dir: str, quiet: bool) -> dict:
+def _handle_download(url: str, output_dir: str, quiet: bool, output_file: str | None = None) -> dict:
     try:
         if quiet:
-            file_path, info = download_video(url, output_dir)
+            file_path, info = download_video(url, output_dir, output_file=output_file)
         else:
             # 带进度条
             with click.progressbar(
@@ -157,13 +193,13 @@ def _handle_download(url: str, output_dir: str, quiet: bool) -> dict:
                         bar.update(pct - last_pct[0])
                         last_pct[0] = pct
 
-                file_path, info = download_video(url, output_dir, on_progress=on_progress)
+                file_path, info = download_video(url, output_dir, on_progress=on_progress, output_file=output_file)
                 bar.update(100 - last_pct[0])
 
         return {"status": "ok", "url": url, "file": file_path, **info}
     except Exception as e:
         logger.error(f"下载失败: {e}")
-        return {"status": "error", "url": url, "error": _classify_error(e)}
+        return _error_json(e, url=url)
 
 
 # ── info（保留快捷方式，等价于 download --info-only）──────
@@ -176,6 +212,40 @@ def info(url, verbose, quiet):
     result = _handle_info(url)
     _json_output(result)
     if result["status"] == "error":
+        sys.exit(2)
+
+
+# ── full（组合命令：下载 + 评论）────────────────────────────
+
+@main.command()
+@click.argument("url")
+@click.option("-o", "--output-dir", default=settings.output_dir, help="视频保存目录")
+@click.option("-O", "--output", "output_file", type=click.Path(), help="指定输出文件路径")
+@click.option("-n", "--max-comments", default=50, help="最大评论数量")
+@_CommonOpts.add
+def full(url, output_dir, output_file, max_comments, verbose, quiet):
+    """一次调用同时完成视频下载和评论抓取（共享浏览器上下文，省一半时间）
+
+    示例:
+      douyin-tool full <url>
+      douyin-tool full -n 100 <url>
+    """
+    try:
+        from core.combined import download_and_comments
+        file_path, info, comments = download_and_comments(
+            url, output_dir=output_dir, max_comments=max_comments, output_file=output_file,
+        )
+        _json_output({
+            "status": "ok",
+            "url": url,
+            "file": file_path,
+            "info": info,
+            "comment_count": len(comments),
+            "comments": comments,
+        })
+    except Exception as e:
+        logger.error(f"组合命令失败: {e}")
+        _json_output(_error_json(e, url=url))
         sys.exit(2)
 
 
@@ -192,7 +262,7 @@ def comments(url, max_comments, verbose, quiet):
         _json_output({"status": "ok", "count": len(result), "comments": result})
     except Exception as e:
         logger.error(f"评论抓取失败: {e}")
-        _json_output({"status": "error", "error": _classify_error(e)})
+        _json_output(_error_json(e, url=url))
         sys.exit(2)
 
 
@@ -212,6 +282,9 @@ def comments(url, max_comments, verbose, quiet):
 def keywords(file, text, count, method, verbose, quiet):
     """从文本中提取高频关键词"""
     if not file and text is None:
+        if sys.stdin.isatty():
+            click.echo("错误: 请通过 -t 传入文本或 -f 指定文件（stdin 为终端且未指定输入源）", err=True)
+            sys.exit(1)
         text = sys.stdin.read()
 
     try:
@@ -225,7 +298,7 @@ def keywords(file, text, count, method, verbose, quiet):
         _json_output(result)
     except Exception as e:
         logger.error(f"关键词提取失败: {e}")
-        _json_output({"status": "error", "error": _classify_error(e)})
+        _json_output(_error_json(e))
         sys.exit(2)
 
 

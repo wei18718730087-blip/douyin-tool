@@ -47,18 +47,29 @@ def _parse_aweme_detail(detail: dict) -> dict:
     cover = video.get("cover", {})
     cover_list = cover.get("url_list", [])
     stats = detail.get("statistics", {})
+    author = detail.get("author", {})
+    music = detail.get("music", {})
+    text_extra = detail.get("text_extra", [])
 
     video_url = url_list[0] if url_list else None
+    hashtags = [t.get("hashtag_name", "") for t in text_extra if t.get("type") == 1 and t.get("hashtag_name")]
 
     return {
         "aweme_id": str(detail.get("aweme_id", "")),
         "title": detail.get("desc", ""),
-        "author": detail.get("author", {}).get("nickname", ""),
+        "author": author.get("nickname", ""),
+        "author_id": str(author.get("uid", "")),
+        "sec_uid": author.get("sec_uid", ""),
         "duration": video.get("duration", 0) // 1000 if video.get("duration") else None,
         "video_url": video_url,
+        "share_url": f"https://www.douyin.com/video/{detail.get('aweme_id', '')}",
         "thumbnail": cover_list[0] if cover_list else None,
         "like_count": stats.get("digg_count"),
         "comment_count": stats.get("comment_count"),
+        "create_time": detail.get("create_time", 0),
+        "music_title": music.get("title", ""),
+        "music_author": music.get("author", ""),
+        "hashtags": hashtags,
     }
 
 
@@ -139,11 +150,13 @@ async def download_video_playwright(
     url: str,
     output_dir: str = "./downloads",
     on_progress=None,
+    output_file: str | None = None,
 ) -> tuple[str, dict]:
     """下载无水印视频，返回 (文件路径, 视频信息)
 
     复用同一个浏览器生命周期：info 阶段拿到下载链接后直接下载，不再二次启动。
     on_progress: 可选回调 (downloaded_bytes, total_bytes|None)
+    output_file: 可选，指定完整输出文件路径（优先于 output_dir + aweme_id）
     """
     from playwright.async_api import async_playwright
 
@@ -161,9 +174,13 @@ async def download_video_playwright(
     if not video_url:
         raise ValueError("无法获取视频下载地址，请检查链接是否有效")
 
-    Path(output_dir).mkdir(parents=True, exist_ok=True)
-    aweme_id = info.get("aweme_id", "unknown")
-    file_path = Path(output_dir) / f"{aweme_id}.mp4"
+    if output_file:
+        file_path = Path(output_file)
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+    else:
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+        aweme_id = info.get("aweme_id", "unknown")
+        file_path = Path(output_dir) / f"{aweme_id}.mp4"
 
     headers = {
         "User-Agent": DESKTOP_UA,
@@ -188,9 +205,10 @@ def download_video(
     url: str,
     output_dir: str = "./downloads",
     on_progress=None,
+    output_file: str | None = None,
 ) -> tuple[str, dict]:
     """下载无水印视频，返回 (文件路径, 视频信息)（同步包装，仅 CLI 用）"""
-    return asyncio.run(download_video_playwright(url, output_dir, on_progress=on_progress))
+    return asyncio.run(download_video_playwright(url, output_dir, on_progress=on_progress, output_file=output_file))
 
 
 def get_video_info_sync(url: str) -> dict:

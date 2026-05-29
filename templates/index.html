@@ -87,7 +87,7 @@
                         <span class="text-sm font-medium text-white">评论</span>
                         <span class="text-xs text-neutral-500" id="comment-count-label"></span>
                     </div>
-                    <div class="flex gap-1.5" id="comment-actions" class="hidden">
+                    <div class="flex gap-1.5 hidden" id="comment-actions">
                         <button onclick="exportComments('json')" class="px-2.5 py-1 text-[11px] text-neutral-400 bg-neutral-800 hover:bg-neutral-700 rounded transition-colors">JSON</button>
                         <button onclick="exportComments('csv')" class="px-2.5 py-1 text-[11px] text-neutral-400 bg-neutral-800 hover:bg-neutral-700 rounded transition-colors">CSV</button>
                     </div>
@@ -290,7 +290,7 @@
         }
 
         empty.classList.add('hidden');
-        actions.style.display = '';
+        actions.classList.remove('hidden');
 
         list.innerHTML = commentsData.map(c => `
             <div class="px-4 py-3 border-b border-neutral-800/50 last:border-0 hover:bg-neutral-800/30 transition-colors">
